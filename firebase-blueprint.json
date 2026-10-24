@@ -1,0 +1,234 @@
+{
+  "entities": {
+    "Script": {
+      "title": "Script",
+      "description": "A saved Python script or automation tool in Xcraft.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique identifier of the script"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID owning this script"
+        },
+        "title": {
+          "type": "string",
+          "description": "Title or filename of the script"
+        },
+        "code": {
+          "type": "string",
+          "description": "Python source code"
+        },
+        "description": {
+          "type": "string",
+          "description": "Brief description of the script"
+        },
+        "category": {
+          "type": "string",
+          "description": "Category such as agent, tool, utility, or audit"
+        },
+        "isVulnerabilityFixed": {
+          "type": "boolean",
+          "description": "Whether the script is audited and verified vulnerability free"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp via server timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Update timestamp via server timestamp"
+        }
+      },
+      "required": ["userId", "title", "code", "category"]
+    },
+    "ChatSession": {
+      "title": "ChatSession",
+      "description": "An AI conversation session with specialized model roles.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique session ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID owning this chat session"
+        },
+        "title": {
+          "type": "string",
+          "description": "Session topic title"
+        },
+        "modelName": {
+          "type": "string",
+          "description": "AI model configured for this chat"
+        },
+        "role": {
+          "type": "string",
+          "description": "Role persona (e.g. CraftX Architect, Security Auditor, CodeGen Master)"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Update timestamp"
+        }
+      },
+      "required": ["userId", "title", "modelName", "role"]
+    },
+    "ChatMessage": {
+      "title": "ChatMessage",
+      "description": "A single message in a chat thread.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Message ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID owning this message"
+        },
+        "role": {
+          "type": "string",
+          "description": "Role of the speaker (user, model, system)"
+        },
+        "content": {
+          "type": "string",
+          "description": "Text content of the message"
+        },
+        "model": {
+          "type": "string",
+          "description": "Model that generated this message"
+        },
+        "thinking": {
+          "type": "string",
+          "description": "Thinking trace if enabled"
+        },
+        "mediaUrl": {
+          "type": "string",
+          "description": "Generated or uploaded media base64 or URI"
+        },
+        "mediaType": {
+          "type": "string",
+          "description": "image/jpeg, video/mp4, etc."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Message timestamp"
+        }
+      },
+      "required": ["userId", "role", "content"]
+    },
+    "ExecutionLog": {
+      "title": "ExecutionLog",
+      "description": "Audit record of tool or script execution in the sovereign sandbox.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Execution log ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID"
+        },
+        "command": {
+          "type": "string",
+          "description": "Executed command or tool name"
+        },
+        "output": {
+          "type": "string",
+          "description": "Execution stdout / stderr output"
+        },
+        "status": {
+          "type": "string",
+          "description": "SUCCESS, FAILED, or BLOCKED"
+        },
+        "durationMs": {
+          "type": "number",
+          "description": "Duration in milliseconds"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Execution timestamp"
+        }
+      },
+      "required": ["userId", "command", "status"]
+    },
+    "CustomTool": {
+      "title": "CustomTool",
+      "description": "An extensible plugin tool in Xcraft.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Tool ID"
+        },
+        "userId": {
+          "type": "string",
+          "description": "User ID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Tool name"
+        },
+        "description": {
+          "type": "string",
+          "description": "Tool description"
+        },
+        "pythonCode": {
+          "type": "string",
+          "description": "Python plugin source code"
+        },
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether the tool is active in the router"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Creation timestamp"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Update timestamp"
+        }
+      },
+      "required": ["userId", "name", "pythonCode"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}/scripts/{scriptId}": {
+      "schema": { "$ref": "#/entities/Script" },
+      "description": "Saved Python scripts and tools owned by the user"
+    },
+    "/users/{userId}/chats/{chatId}": {
+      "schema": { "$ref": "#/entities/ChatSession" },
+      "description": "AI conversation sessions owned by the user"
+    },
+    "/users/{userId}/chats/{chatId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ChatMessage" },
+      "description": "Messages inside a user's chat session"
+    },
+    "/users/{userId}/executions/{executionId}": {
+      "schema": { "$ref": "#/entities/ExecutionLog" },
+      "description": "Execution and audit logs owned by the user"
+    },
+    "/users/{userId}/tools/{toolId}": {
+      "schema": { "$ref": "#/entities/CustomTool" },
+      "description": "Extensible custom plugin tools owned by the user"
+    }
+  }
+}

@@ -1,0 +1,106 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidTimestamp(val) {
+      return val is timestamp && val <= request.time;
+    }
+
+    // Helper functions for validating entities
+
+    function isValidScript(data, userId) {
+      return data.userId == userId &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 150 &&
+        data.code is string && data.code.size() > 0 && data.code.size() <= 100000 &&
+        data.category is string && data.category.size() <= 50 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 1000)) &&
+        (!('isVulnerabilityFixed' in data) || data.isVulnerabilityFixed is bool) &&
+        (!('createdAt' in data) || isValidTimestamp(data.createdAt)) &&
+        (!('updatedAt' in data) || isValidTimestamp(data.updatedAt));
+    }
+
+    function isValidChatSession(data, userId) {
+      return data.userId == userId &&
+        data.title is string && data.title.size() > 0 && data.title.size() <= 200 &&
+        data.modelName is string && data.modelName.size() <= 100 &&
+        data.role is string && data.role.size() <= 100 &&
+        (!('createdAt' in data) || isValidTimestamp(data.createdAt)) &&
+        (!('updatedAt' in data) || isValidTimestamp(data.updatedAt));
+    }
+
+    function isValidChatMessage(data, userId) {
+      return data.userId == userId &&
+        data.role is string && (data.role == 'user' || data.role == 'model' || data.role == 'system') &&
+        data.content is string && data.content.size() <= 50000 &&
+        (!('model' in data) || (data.model is string && data.model.size() <= 100)) &&
+        (!('thinking' in data) || (data.thinking is string && data.thinking.size() <= 50000)) &&
+        (!('mediaUrl' in data) || (data.mediaUrl is string && data.mediaUrl.size() <= 2000000)) &&
+        (!('mediaType' in data) || (data.mediaType is string && data.mediaType.size() <= 100)) &&
+        (!('createdAt' in data) || isValidTimestamp(data.createdAt));
+    }
+
+    function isValidExecutionLog(data, userId) {
+      return data.userId == userId &&
+        data.command is string && data.command.size() > 0 && data.command.size() <= 500 &&
+        data.status is string && data.status.size() <= 50 &&
+        (!('output' in data) || (data.output is string && data.output.size() <= 50000)) &&
+        (!('durationMs' in data) || (data.durationMs is number && data.durationMs >= 0)) &&
+        (!('createdAt' in data) || isValidTimestamp(data.createdAt));
+    }
+
+    function isValidCustomTool(data, userId) {
+      return data.userId == userId &&
+        data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+        data.pythonCode is string && data.pythonCode.size() > 0 && data.pythonCode.size() <= 50000 &&
+        (!('description' in data) || (data.description is string && data.description.size() <= 500)) &&
+        (!('enabled' in data) || data.enabled is bool) &&
+        (!('createdAt' in data) || isValidTimestamp(data.createdAt)) &&
+        (!('updatedAt' in data) || isValidTimestamp(data.updatedAt));
+    }
+
+    // Collection matches under /users/{userId}
+
+    match /users/{userId}/scripts/{scriptId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidScript(request.resource.data, userId);
+      allow update: if isOwner(userId) && isValidScript(request.resource.data, userId);
+      allow delete: if isOwner(userId);
+    }
+
+    match /users/{userId}/chats/{chatId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidChatSession(request.resource.data, userId);
+      allow update: if isOwner(userId) && isValidChatSession(request.resource.data, userId);
+      allow delete: if isOwner(userId);
+
+      match /messages/{messageId} {
+        allow read: if isOwner(userId);
+        allow create: if isOwner(userId) && isValidChatMessage(request.resource.data, userId);
+        allow update: if isOwner(userId) && isValidChatMessage(request.resource.data, userId);
+        allow delete: if isOwner(userId);
+      }
+    }
+
+    match /users/{userId}/executions/{executionId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidExecutionLog(request.resource.data, userId);
+      allow update: if isOwner(userId) && isValidExecutionLog(request.resource.data, userId);
+      allow delete: if isOwner(userId);
+    }
+
+    match /users/{userId}/tools/{toolId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidCustomTool(request.resource.data, userId);
+      allow update: if isOwner(userId) && isValidCustomTool(request.resource.data, userId);
+      allow delete: if isOwner(userId);
+    }
+  }
+}
