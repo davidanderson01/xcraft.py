@@ -155,10 +155,11 @@ object GeminiService {
                 else -> "gemini-3.8-flash"
             }
 
-            val endpoint = "${BASE_URL}v1beta/models/$targetModel:generateContent?key=$apiKey"
+            val endpoint = "${BASE_URL}v1beta/models/$targetModel:generateContent"
             val body = root.toString().toRequestBody(jsonMediaType)
             val request = Request.Builder()
                 .url(endpoint)
+                .addHeader("x-goog-api-key", apiKey)
                 .post(body)
                 .build()
 
@@ -166,10 +167,11 @@ object GeminiService {
             val respString = response.body?.string().orEmpty()
 
             if (!response.isSuccessful) {
-                Log.e(TAG, "Gemini API error ($targetModel): $respString")
+                val sanitizedError = AIAgentFirewall.scanOutput(respString).sanitizedOutput
+                Log.e(TAG, "Gemini API error ($targetModel): ${response.code}")
                 return@withContext GeminiGenerationResult(
                     text = "",
-                    error = "Gemini API call failed (${response.code}): $respString"
+                    error = "Gemini API call failed (${response.code}): $sanitizedError"
                 )
             }
 
@@ -221,20 +223,22 @@ object GeminiService {
             }
 
             val outputScan = AIAgentFirewall.scanOutput(responseText)
+            val sanitizedThinking = thinkingText?.let { AIAgentFirewall.scanOutput(it).sanitizedOutput }
             val finalCleanText = outputScan.sanitizedOutput.ifBlank {
                 if (imageBase64 != null) "Image generated successfully." else "Response received."
             }
 
             return@withContext GeminiGenerationResult(
                 text = finalCleanText,
-                thinking = thinkingText,
+                thinking = sanitizedThinking,
                 imageBase64 = imageBase64,
                 sources = searchSources,
                 firewallSummary = firewallResult.summary
             )
         } catch (e: Exception) {
-            Log.e(TAG, "Error in generateContent", e)
-            return@withContext GeminiGenerationResult(text = "", error = e.localizedMessage ?: "Network error")
+            val safeError = AIAgentFirewall.scanOutput(e.localizedMessage ?: "Network error").sanitizedOutput
+            Log.e(TAG, "Error in generateContent: $safeError")
+            return@withContext GeminiGenerationResult(text = "", error = safeError)
         }
     }
 
@@ -270,16 +274,21 @@ object GeminiService {
             format.put("duration", duration)
             reqObj.put("response_format", format)
 
-            val createUrl = "${BASE_URL}v1beta/interactions?key=$apiKey"
+            val createUrl = "${BASE_URL}v1beta/interactions"
             val body = reqObj.toString().toRequestBody(jsonMediaType)
-            val postReq = Request.Builder().url(createUrl).post(body).build()
+            val postReq = Request.Builder()
+                .url(createUrl)
+                .addHeader("x-goog-api-key", apiKey)
+                .post(body)
+                .build()
 
             val postResp = okHttpClient.newCall(postReq).execute()
             val postStr = postResp.body?.string().orEmpty()
             if (!postResp.isSuccessful) {
+                val safeErr = AIAgentFirewall.scanOutput(postStr).sanitizedOutput
                 return@withContext GeminiGenerationResult(
                     text = "",
-                    error = "Video creation failed (${postResp.code}): $postStr"
+                    error = "Video creation failed (${postResp.code}): $safeErr"
                 )
             }
 
@@ -293,8 +302,12 @@ object GeminiService {
                 delay(4000L)
                 attempts++
                 onProgress("Rendering video ($status)... ${attempts * 4}s")
-                val pollUrl = "${BASE_URL}v1beta/interactions/$interactionId?key=$apiKey"
-                val pollReq = Request.Builder().url(pollUrl).get().build()
+                val pollUrl = "${BASE_URL}v1beta/interactions/$interactionId"
+                val pollReq = Request.Builder()
+                    .url(pollUrl)
+                    .addHeader("x-goog-api-key", apiKey)
+                    .get()
+                    .build()
                 val pollResp = okHttpClient.newCall(pollReq).execute()
                 val pollStr = pollResp.body?.string().orEmpty()
                 if (pollResp.isSuccessful) {

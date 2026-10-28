@@ -34,8 +34,8 @@ jobs:
           touch .env
           chmod +x gradlew || true
 
-      - name: Build Debug APK
-        run: ./gradlew assembleDebug --no-daemon --stacktrace
+      - name: Run Tests & Build Debug APK
+        run: ./gradlew testDebugUnitTest assembleDebug --no-daemon --stacktrace
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
