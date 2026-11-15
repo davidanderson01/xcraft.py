@@ -31,6 +31,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -70,9 +71,16 @@ enum class AppDestination(val title: String, val icon: androidx.compose.ui.graph
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AppNavigation(
-    repository: FirestoreRepository
+    repository: FirestoreRepository,
+    initialSummonedTitle: String? = null,
+    initialSummonedCode: String? = null
 ) {
     var currentDestination by remember { mutableStateOf(AppDestination.STUDIO) }
+    var pendingScriptTitle by remember { mutableStateOf(initialSummonedTitle) }
+    var pendingScriptCode by remember { mutableStateOf(initialSummonedCode) }
+    var scriptLoadToken by remember {
+        mutableIntStateOf(if (initialSummonedCode != null) 1 else 0)
+    }
 
     // Handle back button: if not on STUDIO, return to STUDIO
     BackHandler(enabled = currentDestination != AppDestination.STUDIO) {
@@ -170,12 +178,28 @@ fun AppNavigation(
         ) {
             when (currentDestination) {
                 AppDestination.STUDIO -> ChatScreen(repository = repository)
-                AppDestination.CODEBASE -> CodebaseScreen()
-                AppDestination.PLAYGROUND -> PlaygroundScreen(repository = repository)
+                AppDestination.CODEBASE -> CodebaseScreen(
+                    repository = repository,
+                    onOpenScriptInPlayground = { title, code ->
+                        pendingScriptTitle = title
+                        pendingScriptCode = code
+                        scriptLoadToken += 1
+                        currentDestination = AppDestination.PLAYGROUND
+                    }
+                )
+                AppDestination.PLAYGROUND -> PlaygroundScreen(
+                    repository = repository,
+                    initialScriptTitle = pendingScriptTitle,
+                    initialScriptCode = pendingScriptCode,
+                    scriptLoadToken = scriptLoadToken
+                )
                 AppDestination.SECURITY -> SecurityAuditScreen(repository = repository)
                 AppDestination.CLOUD -> ScriptLibraryScreen(
                     repository = repository,
-                    onOpenInPlayground = { _, _ ->
+                    onOpenInPlayground = { title, code ->
+                        pendingScriptTitle = title
+                        pendingScriptCode = code
+                        scriptLoadToken += 1
                         currentDestination = AppDestination.PLAYGROUND
                     }
                 )

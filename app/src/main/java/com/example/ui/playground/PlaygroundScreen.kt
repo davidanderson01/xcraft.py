@@ -36,6 +36,7 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -52,11 +53,15 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.data.repository.FirestoreRepository
+import com.example.data.repository.SovereignWorkspaceRepository
 import com.example.domain.sandbox.ExecutionResult
 import com.example.domain.sandbox.PythonSandboxEngine
+import com.example.domain.security.EncryptedActivityLogger
+import com.example.domain.telemetry.ExternalSessionTelemetryBridge
 import com.example.ui.theme.BorderStroke
 import com.example.ui.theme.CodeBackground
 import com.example.ui.theme.CyanPrimary
+import com.example.ui.theme.DangerRose
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCard
 import com.example.ui.theme.DarkSurface
@@ -67,6 +72,7 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.WarningAmber
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 val SCRIPT_TEMPLATES = listOf(
@@ -145,10 +151,16 @@ print("Code is clean and verified against PHP/Python CVEs.")
 
 @Composable
 fun PlaygroundScreen(
-    repository: FirestoreRepository
+    repository: FirestoreRepository,
+    initialScriptTitle: String? = null,
+    initialScriptCode: String? = null,
+    scriptLoadToken: Int = 0
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val auditLogger = remember(context) { EncryptedActivityLogger.getInstance(context) }
+    val telemetryBridge = remember(context) { ExternalSessionTelemetryBridge.getInstance(context) }
+    val workspaceRepository = remember(context, repository) { SovereignWorkspaceRepository.getInstance(context, repository) }
 
     var scriptTitle by remember { mutableStateOf("My Sovereign Tool") }
     var scriptCategory by remember { mutableStateOf("tool") }
@@ -157,6 +169,15 @@ fun PlaygroundScreen(
     var isSaving by remember { mutableStateOf(false) }
     var executionResult by remember { mutableStateOf<ExecutionResult?>(null) }
     var auditWarnings by remember { mutableStateOf<List<String>>(emptyList()) }
+
+    LaunchedEffect(scriptLoadToken) {
+        if (scriptLoadToken > 0 && initialScriptCode != null) {
+            scriptTitle = initialScriptTitle?.ifBlank { "Loaded Script" } ?: "Loaded Script"
+            codeText = initialScriptCode
+            executionResult = null
+            auditWarnings = emptyList()
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -223,7 +244,28 @@ fun PlaygroundScreen(
             // Audit Button
             Button(
                 onClick = {
+                    val auditStart = System.currentTimeMillis()
                     auditWarnings = PythonSandboxEngine.auditCode(codeText)
+                    val auditDuration = (System.currentTimeMillis() - auditStart).toDouble()
+                    val auditOut = if (auditWarnings.isEmpty()) "0 vulnerabilities detected" else auditWarnings.joinToString("\n")
+                    auditLogger.logScriptActivityAsync(
+                        action = "SCRIPT_AUDIT",
+                        scriptTitle = scriptTitle,
+                        category = scriptCategory,
+                        status = if (auditWarnings.isEmpty()) "CLEAN" else "WARNINGS_${auditWarnings.size}",
+                        durationMs = auditDuration,
+                        rawCodeOrCommand = codeText,
+                        rawOutput = auditOut
+                    )
+                    telemetryBridge.recordActivityTelemetry(
+                        surface = "PLAYGROUND",
+                        action = "SCRIPT_AUDIT",
+                        scriptTitle = scriptTitle,
+                        command = codeText.take(200),
+                        rawOutput = auditOut,
+                        status = if (auditWarnings.isEmpty()) "CLEAN" else "WARNINGS",
+                        durationMs = auditDuration
+                    )
                     if (auditWarnings.isEmpty()) {
                         Toast.makeText(context, "✅ Clean: 0 vulnerabilities found!", Toast.LENGTH_SHORT).show()
                     }
@@ -242,20 +284,62 @@ fun PlaygroundScreen(
                 onClick = {
                     isExecuting = true
                     coroutineScope.launch {
-                        val result = PythonSandboxEngine.executeScript(codeText)
-                        executionResult = result
-                        isExecuting = false
-
-                        // Automatically log execution to Firestore
                         try {
-                            repository.logExecution(
-                                command = scriptTitle,
-                                output = result.output,
+                            val result = PythonSandboxEngine.executeScript(codeText)
+                            executionResult = result
+
+                            auditLogger.logScriptActivityAsync(
+                                action = if (result.status == "BLOCKED") "SCRIPT_BLOCKED" else "SCRIPT_RUN",
+                                scriptTitle = scriptTitle,
+                                category = scriptCategory,
+                                status = result.status,
+                                durationMs = result.durationMs,
+                                rawCodeOrCommand = codeText,
+                                rawOutput = result.output
+                            )
+                            if (result.status == "BLOCKED") {
+                                auditLogger.logSecurityEventAsync(
+                                    action = "SANDBOX_POLICY_BLOCK",
+                                    target = scriptTitle,
+                                    status = "BLOCKED",
+                                    rawPayload = codeText,
+                                    findings = result.securityFindings
+                                )
+                            }
+
+                            telemetryBridge.recordActivityTelemetry(
+                                surface = "PLAYGROUND",
+                                action = if (result.status == "BLOCKED") "SCRIPT_BLOCKED" else "SCRIPT_RUN",
+                                scriptTitle = scriptTitle,
+                                command = codeText.take(240),
+                                rawOutput = result.output,
                                 status = result.status,
                                 durationMs = result.durationMs
                             )
+
+                            // Automatically log masked execution to Firestore
+                            try {
+                                repository.logExecution(
+                                    command = scriptTitle,
+                                    output = result.output,
+                                    status = result.status,
+                                    durationMs = result.durationMs
+                                )
+                            } catch (e: CancellationException) {
+                                throw e
+                            } catch (_: Exception) {
+                                // Non-fatal cloud sync logging error
+                            }
+                        } catch (e: CancellationException) {
+                            throw e
                         } catch (e: Exception) {
-                            // Non-fatal logging error
+                            executionResult = ExecutionResult(
+                                output = "❌ Execution error: ${e.localizedMessage ?: "Unknown failure"}",
+                                status = "ERROR",
+                                durationMs = 0.0
+                            )
+                        } finally {
+                            isExecuting = false
                         }
                     }
                 },
@@ -278,17 +362,42 @@ fun PlaygroundScreen(
             // Save to Firestore Button
             Button(
                 onClick = {
+                    val cleanTitle = scriptTitle.trim()
+                    val cleanCode = codeText.trim()
+                    if (cleanTitle.isEmpty() || cleanCode.isEmpty()) {
+                        Toast.makeText(context, "Enter both a script title and Python code before saving.", Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
                     isSaving = true
                     coroutineScope.launch {
                         try {
-                            repository.saveScript(
-                                title = scriptTitle,
+                            workspaceRepository.saveScriptAndSync(
+                                title = cleanTitle,
                                 code = codeText,
                                 description = "Saved from Xcraft Playground",
-                                category = scriptCategory
+                                category = scriptCategory,
+                                hierarchyPath = "xcraftpy/scripts/$scriptCategory"
                             )
-                            Toast.makeText(context, "Saved '$scriptTitle' to Firestore!", Toast.LENGTH_SHORT).show()
+                            telemetryBridge.recordActivityTelemetry(
+                                surface = "PLAYGROUND",
+                                action = "SCRIPT_SAVE",
+                                scriptTitle = cleanTitle,
+                                command = "save $cleanTitle",
+                                rawOutput = "Saved to Room + Firestore vault",
+                                status = "SAVED"
+                            )
+                            Toast.makeText(context, "Saved '$cleanTitle' to Room & Firestore!", Toast.LENGTH_SHORT).show()
+                        } catch (e: CancellationException) {
+                            throw e
                         } catch (e: Exception) {
+                            auditLogger.logScriptActivityAsync(
+                                action = "SCRIPT_SAVE",
+                                scriptTitle = cleanTitle,
+                                category = scriptCategory,
+                                status = "ERROR",
+                                rawCodeOrCommand = codeText,
+                                rawOutput = e.message ?: "Save failed"
+                            )
                             Toast.makeText(context, "Save error: ${e.message}", Toast.LENGTH_LONG).show()
                         } finally {
                             isSaving = false
@@ -380,11 +489,11 @@ fun PlaygroundScreen(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text("TERMINAL OUTPUT", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = TextMuted, letterSpacing = 1.sp)
-                        if (executionResult != null) {
+                        executionResult?.let { result ->
                             Spacer(modifier = Modifier.width(8.dp))
-                            val color = if (executionResult!!.status == "SUCCESS") EmeraldTertiary else DangerRose
+                            val color = if (result.status == "SUCCESS") EmeraldTertiary else DangerRose
                             Text(
-                                text = "${executionResult!!.status} (${executionResult!!.durationMs.toInt()}ms)",
+                                text = "${result.status} (${result.durationMs.toInt()}ms)",
                                 fontSize = 10.sp,
                                 color = color,
                                 fontWeight = FontWeight.Bold
@@ -423,5 +532,3 @@ fun PlaygroundScreen(
         }
     }
 }
-
-val DangerRose = com.example.ui.theme.DangerRose

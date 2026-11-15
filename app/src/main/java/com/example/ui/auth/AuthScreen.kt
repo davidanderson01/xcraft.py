@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -103,6 +104,7 @@ fun AuthScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                .systemBarsPadding()
                 .padding(24.dp)
                 .verticalScroll(rememberScrollState()),
             horizontalAlignment = Alignment.CenterHorizontally,
@@ -193,9 +195,9 @@ fun AuthScreen(
             Spacer(modifier = Modifier.height(32.dp))
 
             // Error display if any
-            if (errorMessage != null) {
+            errorMessage?.let { currentError ->
                 Text(
-                    text = errorMessage!!,
+                    text = currentError,
                     color = MaterialTheme.colorScheme.error,
                     fontSize = 12.sp,
                     textAlign = TextAlign.Center,

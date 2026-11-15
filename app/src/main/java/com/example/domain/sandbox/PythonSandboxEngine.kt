@@ -1,12 +1,12 @@
 package com.example.domain.sandbox
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.net.InetAddress
 import java.net.URL
 import java.security.cert.X509Certificate
 import java.text.SimpleDateFormat
-import java.util.Date
 import java.util.Locale
 import java.util.regex.Pattern
 import javax.net.ssl.HttpsURLConnection
@@ -25,15 +25,19 @@ object PythonSandboxEngine {
         "ping", "traceroute", "curl", "whois", "dig", "nslookup"
     )
 
-    val DANGEROUS_PATTERNS = listOf(
-        Pattern.compile("\\b(eval|exec)\\s*\\("),
-        Pattern.compile("pickle\\.(loads|load)\\s*\\("),
-        Pattern.compile("(os\\.system\\s*\\(|subprocess\\.\\w+\\(.*shell\\s*=\\s*True)"),
-        Pattern.compile("\\b(passthru|shell_exec|system|popen)\\s*\\("),
-        Pattern.compile("tempfile\\.mktemp\\s*\\("),
-        Pattern.compile("__import__\\s*\\("),
-        Pattern.compile("rm\\s+-rf")
-    )
+    private val EVAL_EXEC_PATTERN = Pattern.compile("\\b(eval|exec)\\s*\\(")
+    private val PICKLE_PATTERN = Pattern.compile("pickle\\.(loads|load)\\s*\\(")
+    private val SHELL_EXEC_PATTERN = Pattern.compile("(os\\.system\\s*\\(|shell\\s*=\\s*True)")
+    private val LEGACY_PHP_SHELL_PATTERN = Pattern.compile("\\b(passthru|shell_exec|system|popen)\\s*\\(")
+    private val DYNAMIC_IMPORT_PATTERN = Pattern.compile("__import__\\s*\\(")
+    private val MKTEMP_PATTERN = Pattern.compile("tempfile\\.mktemp\\s*\\(")
+    private val UNSAFE_YAML_PATTERN = Pattern.compile("yaml\\.load\\s*\\(")
+    private val EXTRACTALL_PATTERN = Pattern.compile("\\.(extractall|extract)\\s*\\(")
+    private val HOSTNAME_PATTERN = Regex("^[a-zA-Z0-9.-]{1,253}$")
+
+    private val dateFormatter = object : ThreadLocal<SimpleDateFormat>() {
+        override fun initialValue(): SimpleDateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+    }
 
     /**
      * Audit code against CVE & unsafe patterns.
@@ -43,20 +47,33 @@ object PythonSandboxEngine {
         val lines = code.lines()
 
         for ((idx, line) in lines.withIndex()) {
-            if (Pattern.compile("\\b(eval|exec)\\s*\\(").matcher(line).find()) {
-                findings.add("[CRITICAL] Line ${idx + 1}: Arbitrary Code Execution via eval()/exec(). Use safe parsing or AST literals.")
+            val trimmed = line.trim()
+            if (trimmed.startsWith("#")) continue
+            val lineNum = idx + 1
+
+            if (EVAL_EXEC_PATTERN.matcher(line).find()) {
+                findings.add("[CRITICAL] Line $lineNum: Arbitrary Code Execution via eval()/exec(). Use safe parsing or AST literals.")
             }
-            if (Pattern.compile("pickle\\.(loads|load)\\s*\\(").matcher(line).find()) {
-                findings.add("[CRITICAL] Line ${idx + 1}: Insecure deserialization via pickle. Use JSON or protocol buffers.")
+            if (PICKLE_PATTERN.matcher(line).find()) {
+                findings.add("[CRITICAL] Line $lineNum: Insecure deserialization via pickle. Use JSON or protocol buffers.")
             }
-            if (Pattern.compile("(os\\.system\\s*\\(|shell\\s*=\\s*True)").matcher(line).find()) {
-                findings.add("[HIGH] Line ${idx + 1}: Potential shell injection via os.system or shell=True. Use SafeShell argument list.")
+            if (SHELL_EXEC_PATTERN.matcher(line).find()) {
+                findings.add("[HIGH] Line $lineNum: Potential shell injection via os.system or shell=True. Use SafeShell argument list.")
             }
-            if (Pattern.compile("\\b(passthru|shell_exec|system|popen)\\s*\\(").matcher(line).find()) {
-                findings.add("[CRITICAL] Line ${idx + 1}: Legacy PHP/shell execution wrapper. Disallowed in sovereign Xcraft.")
+            if (LEGACY_PHP_SHELL_PATTERN.matcher(line).find()) {
+                findings.add("[CRITICAL] Line $lineNum: Legacy PHP/shell execution wrapper. Disallowed in sovereign Xcraft.")
             }
-            if (Pattern.compile("__import__\\s*\\(").matcher(line).find()) {
-                findings.add("[MEDIUM] Line ${idx + 1}: Dynamic import bypass token detected.")
+            if (DYNAMIC_IMPORT_PATTERN.matcher(line).find()) {
+                findings.add("[MEDIUM] Line $lineNum: Dynamic import bypass token detected.")
+            }
+            if (MKTEMP_PATTERN.matcher(line).find()) {
+                findings.add("[MEDIUM] Line $lineNum: Insecure tempfile.mktemp() race condition. Use tempfile.NamedTemporaryFile().")
+            }
+            if (UNSAFE_YAML_PATTERN.matcher(line).find() && !line.contains("SafeLoader")) {
+                findings.add("[HIGH] Line $lineNum: Unsafe yaml.load() without SafeLoader (arbitrary object construction risk).")
+            }
+            if (EXTRACTALL_PATTERN.matcher(line).find()) {
+                findings.add("[HIGH] Line $lineNum: Unchecked archive extraction (CVE-2024-38519 Zip Slip risk). Validate member paths.")
             }
         }
         return findings
@@ -95,7 +112,7 @@ object PythonSandboxEngine {
 
                 // Check for DNS Validator usage or simulation
                 if (line.contains("DNSValidator") || line.contains(".route(\"dns\"") || line.startsWith("dns ")) {
-                    val domain = extractTarget(line, "google.com")
+                    val domain = sanitizeHostname(extractTarget(line, "google.com"), "google.com")
                     outputBuffer.appendLine("[DNS Validator] Querying domain '$domain'...")
                     try {
                         val addresses = InetAddress.getAllByName(domain)
@@ -103,37 +120,44 @@ object PythonSandboxEngine {
                         for (addr in addresses) {
                             outputBuffer.appendLine("   • ${addr.hostAddress} (${if (addr.address.size == 4) "IPv4" else "IPv6"})")
                         }
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         outputBuffer.appendLine("❌ DNS Resolution failed: ${e.message}")
                     }
                 }
                 // Check for SSL Checker usage or simulation
                 else if (line.contains("SSLChecker") || line.contains(".route(\"ssl\"") || line.startsWith("ssl ")) {
-                    val host = extractTarget(line, "python.org")
+                    val host = sanitizeHostname(extractTarget(line, "python.org"), "python.org")
                     outputBuffer.appendLine("[SSL Checker] Inspecting certificate for '$host'...")
+                    var conn: HttpsURLConnection? = null
                     try {
                         val url = URL("https://$host")
-                        val conn = url.openConnection() as HttpsURLConnection
-                        conn.connectTimeout = 5000
-                        conn.readTimeout = 5000
-                        conn.connect()
+                        conn = (url.openConnection() as HttpsURLConnection).apply {
+                            connectTimeout = 5000
+                            readTimeout = 5000
+                            connect()
+                        }
                         val certs = conn.serverCertificates
                         if (certs.isNotEmpty() && certs[0] is X509Certificate) {
                             val x509 = certs[0] as X509Certificate
                             val expiry = x509.notAfter
                             val daysLeft = ((expiry.time - System.currentTimeMillis()) / (1000 * 60 * 60 * 24)).toInt()
-                            val df = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                            val formattedExpiry = dateFormatter.get()?.format(expiry) ?: expiry.toString()
                             outputBuffer.appendLine("✅ Valid SSL/TLS Certificate for $host:")
-                            outputBuffer.appendLine("   • Subject: ${x509.subjectDN.name}")
-                            outputBuffer.appendLine("   • Issuer: ${x509.issuerDN.name}")
-                            outputBuffer.appendLine("   • Expires: ${df.format(expiry)} ($daysLeft days remaining)")
+                            outputBuffer.appendLine("   • Subject: ${x509.subjectX500Principal.name}")
+                            outputBuffer.appendLine("   • Issuer: ${x509.issuerX500Principal.name}")
+                            outputBuffer.appendLine("   • Expires: $formattedExpiry ($daysLeft days remaining)")
                             outputBuffer.appendLine("   • Cipher Suite: ${conn.cipherSuite}")
                         } else {
                             outputBuffer.appendLine("✅ Connected to HTTPS on $host (Cipher: ${conn.cipherSuite})")
                         }
-                        conn.disconnect()
+                    } catch (e: CancellationException) {
+                        throw e
                     } catch (e: Exception) {
                         outputBuffer.appendLine("❌ SSL Check failed: ${e.message}")
+                    } finally {
+                        conn?.disconnect()
                     }
                 }
                 // Check for Safe Shell execution
@@ -174,6 +198,8 @@ object PythonSandboxEngine {
                 durationMs = duration,
                 securityFindings = findings
             )
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: Exception) {
             val duration = (System.currentTimeMillis() - startTime).toDouble()
             ExecutionResult(
@@ -194,4 +220,11 @@ object PythonSandboxEngine {
         val parts = line.split(" ")
         return if (parts.size > 1) parts[1].trim() else default
     }
+
+    private fun sanitizeHostname(candidate: String, fallback: String): String {
+        val clean = candidate.trim().removePrefix("https://").removePrefix("http://").substringBefore("/")
+        return if (HOSTNAME_PATTERN.matcherOrMatches(clean)) clean else fallback
+    }
+
+    private fun Regex.matcherOrMatches(input: String): Boolean = this.matches(input)
 }

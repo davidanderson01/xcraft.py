@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Base64
+import kotlinx.coroutines.CancellationException
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
@@ -84,8 +85,13 @@ import androidx.compose.ui.unit.sp
 import com.example.data.model.ChatMessageEntity
 import com.example.data.remote.GeminiService
 import com.example.data.repository.FirestoreRepository
+import com.example.domain.security.EncryptedActivityLogger
+import com.example.domain.security.ThreatLevel
+import com.example.domain.telemetry.ExternalSessionTelemetryBridge
+import com.example.ui.theme.BorderStroke
 import com.example.ui.theme.CodeBackground
 import com.example.ui.theme.CyanPrimary
+import com.example.ui.theme.CyanPrimaryVariant
 import com.example.ui.theme.DarkBackground
 import com.example.ui.theme.DarkCard
 import com.example.ui.theme.DarkSurface
@@ -96,7 +102,13 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.WarningAmber
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.math.max
+import kotlin.math.roundToInt
+
+private const val WELCOME_MESSAGE_ID = "welcome_greeting"
 
 data class UIMessage(
     val id: String = java.util.UUID.randomUUID().toString(),
@@ -124,6 +136,8 @@ fun ChatScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val listState = rememberLazyListState()
+    val auditLogger = remember(context) { EncryptedActivityLogger.getInstance(context) }
+    val telemetryBridge = remember(context) { ExternalSessionTelemetryBridge.getInstance(context) }
 
     var selectedRoleIndex by remember { mutableStateOf(0) }
     var selectedModel by remember { mutableStateOf("gemini-3.8-flash") }
@@ -149,6 +163,7 @@ fun ChatScreen(
         if (messages.isEmpty()) {
             messages.add(
                 UIMessage(
+                    id = WELCOME_MESSAGE_ID,
                     role = "model",
                     content = "👋 Welcome to **Xcraft Studio**! I am your **${SYSTEM_ROLES[selectedRoleIndex].first}**.\n\n" +
                             "I can route across **Gemini 4 Argon** (with High Thinking), **Gemini 3.8 Flash** (with Google Search grounding), **3.1 Flash-Lite** (low-latency), " +
@@ -159,17 +174,17 @@ fun ChatScreen(
         }
     }
 
-    // Photo picker launcher
+    // Photo picker launcher (decodes and downscales off the main thread)
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
         selectedImageUri = uri
         if (uri != null) {
-            try {
-                val input = context.contentResolver.openInputStream(uri)
-                selectedImageBitmap = BitmapFactory.decodeStream(input)
-            } catch (e: Exception) {
-                selectedImageBitmap = null
+            coroutineScope.launch {
+                val decoded = withContext(Dispatchers.IO) {
+                    decodeScaledBitmap(context, uri, maxDimension = 1600)
+                }
+                selectedImageBitmap = decoded
             }
         }
     }
@@ -431,7 +446,7 @@ fun ChatScreen(
         }
 
         // Selected Image Preview Thumbnail before sending
-        if (selectedImageBitmap != null) {
+        selectedImageBitmap?.let { bmp ->
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -440,7 +455,7 @@ fun ChatScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Image(
-                    bitmap = selectedImageBitmap!!.asImageBitmap(),
+                    bitmap = bmp.asImageBitmap(),
                     contentDescription = "Selected photo",
                     modifier = Modifier
                         .size(54.dp)
@@ -451,10 +466,13 @@ fun ChatScreen(
                     Text("Photo attached for analysis", fontSize = 12.sp, color = TextPrimary)
                     Text("Will analyze with Gemini 4 Argon", fontSize = 10.sp, color = CyanPrimary)
                 }
-                IconButton(onClick = {
-                    selectedImageBitmap = null
-                    selectedImageUri = null
-                }) {
+                IconButton(
+                    onClick = {
+                        selectedImageBitmap = null
+                        selectedImageUri = null
+                    },
+                    modifier = Modifier.size(48.dp)
+                ) {
                     Icon(Icons.Default.Close, contentDescription = "Remove photo", tint = TextMuted)
                 }
             }
@@ -501,7 +519,7 @@ fun ChatScreen(
                             PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                         )
                     },
-                    modifier = Modifier.size(42.dp)
+                    modifier = Modifier.size(48.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.AddPhotoAlternate,
@@ -557,6 +575,11 @@ fun ChatScreen(
                                 else -> selectedModel
                             }
 
+                            val historyPairs = messages
+                                .filter { it.id != WELCOME_MESSAGE_ID && !it.content.startsWith("❌") }
+                                .map { it.role to it.content }
+                                .takeLast(10)
+
                             // Add user message to UI
                             messages.add(
                                 UIMessage(
@@ -572,69 +595,158 @@ fun ChatScreen(
                             isGenerating = true
                             statusStatusText = "Connecting to $targetModel..."
 
+                            val roleName = SYSTEM_ROLES[selectedRoleIndex].first
+
                             coroutineScope.launch {
-                                listState.animateScrollToItem(messages.size)
+                                try {
+                                    listState.animateScrollToItem(messages.size)
 
-                                if (isVideoGenMode) {
-                                    val videoResult = GeminiService.generateVideo(
-                                        prompt = userText,
-                                        aspectRatio = selectedAspectRatio,
-                                        onProgress = { statusStatusText = it }
-                                    )
-
-                                    isGenerating = false
-                                    messages.add(
-                                        UIMessage(
-                                            role = "model",
-                                            content = if (videoResult.error != null) "❌ ${videoResult.error}" else videoResult.text,
-                                            model = "gemini-omni-1.1-flash",
-                                            videoBase64 = videoResult.videoBase64
+                                    if (isVideoGenMode) {
+                                        val startMs = System.currentTimeMillis()
+                                        val videoResult = GeminiService.generateVideo(
+                                            prompt = userText,
+                                            aspectRatio = selectedAspectRatio,
+                                            onProgress = { statusStatusText = it }
                                         )
-                                    )
-                                } else {
-                                    val historyPairs = messages.map { it.role to it.content }
-                                    val result = GeminiService.generateContent(
-                                        model = targetModel,
-                                        prompt = userText,
-                                        systemInstruction = activeRole,
-                                        history = historyPairs.takeLast(10),
-                                        enableSearch = enableSearchGrounding,
-                                        enableHighThinking = enableHighThinking,
-                                        imageBitmap = uploadedBmp,
-                                        generateImage = isImageGenMode,
-                                        imageAspectRatio = selectedAspectRatio,
-                                        imageResolution = selectedResolution
-                                    )
+                                        val elapsedMs = (System.currentTimeMillis() - startMs).toDouble()
+                                        val usedModel = videoResult.modelUsed ?: "gemini-omni-1.1-flash"
+                                        val outcomeText = if (videoResult.error != null) videoResult.error else videoResult.text
 
-                                    var genBmp: Bitmap? = null
-                                    if (result.imageBase64 != null) {
-                                        try {
-                                            val bytes = Base64.decode(result.imageBase64, Base64.DEFAULT)
-                                            genBmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                        } catch (e: Exception) {
-                                            // Handle decoding error
-                                        }
-                                    }
+                                        auditLogger.logAgentExecutionAsync(
+                                            action = "AGENT_VIDEO_GEN",
+                                            model = usedModel,
+                                            role = roleName,
+                                            status = if (videoResult.error != null) "ERROR" else "SUCCESS",
+                                            durationMs = elapsedMs,
+                                            rawPrompt = userText,
+                                            rawOutputOrError = outcomeText
+                                        )
+                                        telemetryBridge.recordActivityTelemetry(
+                                            surface = "AI_STUDIO",
+                                            action = "AGENT_VIDEO_GEN",
+                                            scriptTitle = usedModel,
+                                            command = userText.take(180),
+                                            rawOutput = outcomeText.take(240),
+                                            status = if (videoResult.error != null) "ERROR" else "SUCCESS",
+                                            durationMs = elapsedMs
+                                        )
 
-                                    isGenerating = false
-                                    messages.add(
-                                        UIMessage(
-                                            role = "model",
-                                            content = if (result.error != null) "❌ ${result.error}" else result.text,
+                                        messages.add(
+                                            UIMessage(
+                                                role = "model",
+                                                content = if (videoResult.error != null) "❌ ${videoResult.error}" else videoResult.text,
+                                                model = usedModel,
+                                                videoBase64 = videoResult.videoBase64
+                                            )
+                                        )
+                                    } else {
+                                        val result = GeminiService.generateContent(
                                             model = targetModel,
-                                            thinking = result.thinking,
-                                            imageBitmap = genBmp,
-                                            searchSources = result.sources.map { "${it.title}: ${it.uri}" }
+                                            prompt = userText,
+                                            systemInstruction = activeRole,
+                                            history = historyPairs,
+                                            enableSearch = enableSearchGrounding,
+                                            enableHighThinking = enableHighThinking,
+                                            imageBitmap = uploadedBmp,
+                                            generateImage = isImageGenMode,
+                                            imageAspectRatio = selectedAspectRatio,
+                                            imageResolution = selectedResolution,
+                                            onStatus = { statusStatusText = it }
+                                        )
+
+                                        val usedModel = result.modelUsed ?: targetModel
+                                        val actionLabel = when {
+                                            isImageGenMode -> "AGENT_IMAGE_GEN"
+                                            uploadedBmp != null -> "AGENT_MULTIMODAL"
+                                            usedModel != targetModel -> "AGENT_FALLBACK"
+                                            else -> "AGENT_CHAT"
+                                        }
+                                        val statusLabel = when {
+                                            result.error != null -> "ERROR"
+                                            result.firewallThreatLevel == ThreatLevel.BLOCKED -> "GUARDED"
+                                            else -> "SUCCESS"
+                                        }
+
+                                        auditLogger.logAgentExecutionAsync(
+                                            action = actionLabel,
+                                            model = usedModel,
+                                            role = roleName,
+                                            status = statusLabel,
+                                            durationMs = result.durationMs,
+                                            rawPrompt = userText.ifEmpty { "[Image Attachment]" },
+                                            rawOutputOrError = result.error ?: result.text,
+                                            preRedactionsCount = result.outputRedactionsCount
+                                        )
+                                        telemetryBridge.recordActivityTelemetry(
+                                            surface = "AI_STUDIO",
+                                            action = actionLabel,
+                                            scriptTitle = usedModel,
+                                            command = userText.ifEmpty { "[Image Attachment]" }.take(180),
+                                            rawOutput = (result.error ?: result.text).take(240),
+                                            status = statusLabel,
+                                            durationMs = result.durationMs
+                                        )
+
+                                        if (result.firewallThreatLevel != ThreatLevel.CLEAN) {
+                                            auditLogger.logSecurityEventAsync(
+                                                action = "FIREWALL_AGENT_INTERCEPT",
+                                                target = usedModel,
+                                                status = result.firewallThreatLevel.name,
+                                                rawPayload = userText,
+                                                findings = listOfNotNull(result.firewallSummary)
+                                            )
+                                        }
+
+                                        var genBmp: Bitmap? = null
+                                        if (result.imageBase64 != null) {
+                                            try {
+                                                val bytes = Base64.decode(result.imageBase64, Base64.DEFAULT)
+                                                genBmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                            } catch (e: Exception) {
+                                                // Handle decoding error
+                                            }
+                                        }
+
+                                        messages.add(
+                                            UIMessage(
+                                                role = "model",
+                                                content = if (result.error != null) "❌ ${result.error}" else result.text,
+                                                model = usedModel,
+                                                thinking = result.thinking,
+                                                imageBitmap = genBmp,
+                                                searchSources = result.sources.map { "${it.title}: ${it.uri}" }
+                                            )
+                                        )
+                                    }
+                                    listState.animateScrollToItem(messages.size)
+                                } catch (e: CancellationException) {
+                                    throw e
+                                } catch (e: Exception) {
+                                    auditLogger.logAgentExecutionAsync(
+                                        action = "AGENT_EXCEPTION",
+                                        model = targetModel,
+                                        role = roleName,
+                                        status = "ERROR",
+                                        durationMs = 0.0,
+                                        rawPrompt = userText,
+                                        rawOutputOrError = e.localizedMessage ?: "Request failed."
+                                    )
+                                    messages.add(
+                                        UIMessage(
+                                            role = "model",
+                                            content = "❌ ${e.localizedMessage ?: "Request failed."}",
+                                            model = targetModel
                                         )
                                     )
+                                } finally {
+                                    isGenerating = false
                                 }
-                                listState.animateScrollToItem(messages.size)
                             }
                         }
                     },
                     enabled = !isGenerating && (inputText.isNotBlank() || selectedImageBitmap != null),
                     modifier = Modifier
-                        .size(44.dp)
+                        .size(48.dp)
                         .clip(CircleShape)
                         .background(if (!isGenerating && (inputText.isNotBlank() || selectedImageBitmap != null)) CyanPrimary else DarkCard)
                         .testTag("chat_send_button")
@@ -811,5 +923,27 @@ private fun ChatMessageItem(message: UIMessage) {
     }
 }
 
-val BorderStroke = com.example.ui.theme.BorderStroke
-val CyanPrimaryVariant = com.example.ui.theme.CyanPrimaryVariant
+private fun decodeScaledBitmap(
+    context: android.content.Context,
+    uri: Uri,
+    maxDimension: Int
+): Bitmap? {
+    return try {
+        val rawBitmap = context.contentResolver.openInputStream(uri)?.use { input ->
+            BitmapFactory.decodeStream(input)
+        } ?: return null
+
+        val largestSide = max(rawBitmap.width, rawBitmap.height)
+        if (largestSide <= maxDimension || largestSide <= 0) {
+            return rawBitmap
+        }
+        val scale = maxDimension.toFloat() / largestSide.toFloat()
+        val targetW = (rawBitmap.width * scale).roundToInt().coerceAtLeast(1)
+        val targetH = (rawBitmap.height * scale).roundToInt().coerceAtLeast(1)
+        Bitmap.createScaledBitmap(rawBitmap, targetW, targetH, true).also {
+            if (it !== rawBitmap) rawBitmap.recycle()
+        }
+    } catch (_: Exception) {
+        null
+    }
+}

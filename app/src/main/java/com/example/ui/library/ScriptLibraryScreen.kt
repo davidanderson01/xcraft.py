@@ -60,6 +60,9 @@ import androidx.compose.ui.unit.sp
 import androidx.credentials.CredentialManager
 import com.example.data.model.ScriptEntity
 import com.example.data.repository.FirestoreRepository
+import com.example.data.repository.SovereignWorkspaceRepository
+import com.example.domain.security.EncryptedActivityLogger
+import com.example.domain.telemetry.ExternalSessionTelemetryBridge
 import com.example.ui.auth.performSignOut
 import com.example.ui.theme.BorderStroke
 import com.example.ui.theme.CodeBackground
@@ -75,6 +78,7 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.google.firebase.Firebase
 import com.google.firebase.auth.auth
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 @Composable
@@ -85,6 +89,9 @@ fun ScriptLibraryScreen(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val credentialManager = remember { CredentialManager.create(context) }
+    val auditLogger = remember(context) { EncryptedActivityLogger.getInstance(context) }
+    val telemetryBridge = remember(context) { ExternalSessionTelemetryBridge.getInstance(context) }
+    val workspaceRepository = remember(context, repository) { SovereignWorkspaceRepository.getInstance(context, repository) }
     val currentUser = Firebase.auth.currentUser
 
     val scripts by repository.observeScripts().collectAsState(initial = emptyList())
@@ -211,12 +218,31 @@ fun ScriptLibraryScreen(
                     items(scripts, key = { it.id }) { script ->
                         ScriptCardItem(
                             script = script,
-                            onOpen = { onOpenInPlayground(script.title, script.code) },
+                            onOpen = {
+                                telemetryBridge.recordActivityTelemetry(
+                                    surface = "CLOUD_SCRIPTS",
+                                    action = "SCRIPT_OPEN",
+                                    scriptTitle = script.title,
+                                    command = "open ${script.title}",
+                                    rawOutput = "Opened script in Playground",
+                                    status = "OPENED"
+                                )
+                                onOpenInPlayground(script.title, script.code)
+                            },
                             onDelete = {
                                 coroutineScope.launch {
                                     try {
                                         repository.deleteScript(script.id)
+                                        auditLogger.logScriptActivityAsync(
+                                            action = "SCRIPT_DELETE",
+                                            scriptTitle = script.title,
+                                            category = script.category,
+                                            status = "DELETED",
+                                            rawCodeOrCommand = script.code
+                                        )
                                         Toast.makeText(context, "Deleted ${script.title}", Toast.LENGTH_SHORT).show()
+                                    } catch (e: CancellationException) {
+                                        throw e
                                     } catch (e: Exception) {
                                         Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                                     }
@@ -297,14 +323,27 @@ fun ScriptLibraryScreen(
                             if (newTitle.isNotBlank() && newCode.isNotBlank()) {
                                 coroutineScope.launch {
                                     try {
-                                        repository.saveScript(
-                                            title = newTitle.trim(),
-                                            code = newCode.trim(),
+                                        val cleanTitle = newTitle.trim()
+                                        val cleanCode = newCode.trim()
+                                        workspaceRepository.saveScriptAndSync(
+                                            title = cleanTitle,
+                                            code = cleanCode,
                                             description = newDesc.trim(),
-                                            category = "tool"
+                                            category = "tool",
+                                            hierarchyPath = "xcraftpy/cloud/tool"
+                                        )
+                                        telemetryBridge.recordActivityTelemetry(
+                                            surface = "CLOUD_SCRIPTS",
+                                            action = "SCRIPT_CREATE",
+                                            scriptTitle = cleanTitle,
+                                            command = "create $cleanTitle",
+                                            rawOutput = "Stored in Room + Firestore vault",
+                                            status = "CREATED"
                                         )
                                         showCreateDialog = false
-                                        Toast.makeText(context, "Saved script to Firestore", Toast.LENGTH_SHORT).show()
+                                        Toast.makeText(context, "Saved script to Room & Firestore", Toast.LENGTH_SHORT).show()
+                                    } catch (e: CancellationException) {
+                                        throw e
                                     } catch (e: Exception) {
                                         Toast.makeText(context, "Error: ${e.message}", Toast.LENGTH_SHORT).show()
                                     }
@@ -346,22 +385,33 @@ private fun ScriptCardItem(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
                     Icon(Icons.Default.Code, contentDescription = null, tint = CyanPrimary, modifier = Modifier.size(18.dp))
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = script.title,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
-                        color = TextPrimary
+                        color = TextPrimary,
+                        maxLines = 1
                     )
                 }
 
                 Row {
-                    IconButton(onClick = onOpen, modifier = Modifier.size(32.dp)) {
+                    IconButton(
+                        onClick = onOpen,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("open_script_button")
+                    ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = "Run in Playground", tint = EmeraldTertiary)
                     }
-                    IconButton(onClick = onDelete, modifier = Modifier.size(32.dp)) {
+                    IconButton(
+                        onClick = onDelete,
+                        modifier = Modifier
+                            .size(48.dp)
+                            .testTag("delete_script_button")
+                    ) {
                         Icon(Icons.Default.Delete, contentDescription = "Delete", tint = DangerRose)
                     }
                 }

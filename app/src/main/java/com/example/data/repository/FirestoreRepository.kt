@@ -203,11 +203,13 @@ class FirestoreRepository(
     suspend fun logExecution(command: String, output: String, status: String, durationMs: Double): String {
         val uid = auth.currentUser?.uid ?: return "local"
         return try {
+            val maskedCommand = com.example.domain.security.SensitiveDataMasker.maskText(command).take(500)
+            val maskedOutput = com.example.domain.security.SensitiveDataMasker.maskText(output).take(45000)
             val docRef = db.collection("users").document(uid).collection("executions").document()
             val data = mapOf(
                 "userId" to uid,
-                "command" to command,
-                "output" to output.take(45000),
+                "command" to maskedCommand,
+                "output" to maskedOutput,
                 "status" to status,
                 "durationMs" to durationMs,
                 "createdAt" to FieldValue.serverTimestamp()

@@ -70,11 +70,12 @@ object AIAgentFirewall {
     // 4. Secret & Key Leakage Patterns in Output
     private val SECRET_LEAK_PATTERNS = listOf(
         Pattern.compile("AIza[0-9A-Za-z-_]{35}"), // Google API Key format
-        Pattern.compile("sk-[a-zA-Z0-9_-]{20,}"), // OpenAI / Anthropic format
-        Pattern.compile("ghp_[a-zA-Z0-9]{36}"), // GitHub PAT
-        Pattern.compile("github_pat_[a-zA-Z0-9_]{50,}"), // Fine-grained GitHub PAT
-        Pattern.compile("AKIA[0-9A-Z]{16}"), // AWS Access Key ID
-        Pattern.compile("-----BEGIN [A-Z ]*PRIVATE KEY-----"), // Private Keys
+        Pattern.compile("\\b(sk|rk)_(live|test)_[A-Za-z0-9]{16,}|\\bsk-[a-zA-Z0-9_-]{20,}"), // OpenAI / Anthropic / Stripe keys
+        Pattern.compile("\\b(gh[pousr]_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9_]{30,})\\b"), // GitHub PATs
+        Pattern.compile("\\bAKIA[0-9A-Z]{16}\\b"), // AWS Access Key ID
+        Pattern.compile("\\bxox[baprs]-[0-9A-Za-z-]{10,}\\b"), // Slack tokens
+        Pattern.compile("https?://[^/\\s:@]+:[^/\\s@]+@"), // Embedded URL credentials
+        Pattern.compile("-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----"), // Private Keys
         Pattern.compile("firebase_applet_config"),
         Pattern.compile("KEYSTORE_PATH|STORE_PASSWORD|KEY_PASSWORD")
     )

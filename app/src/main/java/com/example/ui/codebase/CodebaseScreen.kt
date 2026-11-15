@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -26,6 +28,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Folder
@@ -53,6 +56,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.domain.codebase.SourceFile
@@ -71,12 +75,23 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.WarningAmber
 
+import com.example.data.repository.FirestoreRepository
+import com.example.ui.hierarchy.HierarchyPlannerScreen
+
 @Composable
-fun CodebaseScreen() {
+fun CodebaseScreen(
+    repository: FirestoreRepository? = null,
+    onOpenScriptInPlayground: (String, String) -> Unit = { _, _ -> }
+) {
     val context = LocalContext.current
     val files = XcraftSourceCodebase.files
     var selectedFile by remember { mutableStateOf<SourceFile>(files.first()) }
     var testOutput by remember { mutableStateOf<String?>(null) }
+    var showHierarchyPlanner by remember { mutableStateOf(false) }
+
+    BackHandler(enabled = showHierarchyPlanner) {
+        showHierarchyPlanner = false
+    }
 
     Column(
         modifier = Modifier
@@ -84,6 +99,53 @@ fun CodebaseScreen() {
             .background(DarkBackground)
             .testTag("codebase_screen")
     ) {
+        // Mode Switcher: Restored Codebase vs Room Hierarchy Planner
+        Surface(color = DarkSurface, tonalElevation = 2.dp) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = { showHierarchyPlanner = false },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (!showHierarchyPlanner) CyanPrimary else DarkCard,
+                        contentColor = if (!showHierarchyPlanner) Color.Black else TextSecondary
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("codebase_tab_source")
+                ) {
+                    Text("Xcraft Source", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+                Button(
+                    onClick = { showHierarchyPlanner = true },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = if (showHierarchyPlanner) CyanPrimary else DarkCard,
+                        contentColor = if (showHierarchyPlanner) Color.Black else TextSecondary
+                    ),
+                    shape = RoundedCornerShape(8.dp),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(48.dp)
+                        .testTag("codebase_tab_hierarchy")
+                ) {
+                    Text("Hierarchy Planner", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+
+        if (showHierarchyPlanner) {
+            HierarchyPlannerScreen(
+                firestoreRepository = repository,
+                onOpenScriptInPlayground = onOpenScriptInPlayground
+            )
+            return
+        }
+
         // Header Banner with Sovereign Audited Badge
         Surface(
             color = DarkSurface,
@@ -140,7 +202,9 @@ fun CodebaseScreen() {
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = CyanPrimary, contentColor = Color.Black),
                         shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
                     ) {
                         Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
@@ -162,7 +226,9 @@ fun CodebaseScreen() {
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = DarkCard, contentColor = TextPrimary),
                         shape = RoundedCornerShape(8.dp),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(48.dp)
                     ) {
                         Icon(Icons.Default.PlayArrow, contentDescription = null, tint = EmeraldTertiary, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
@@ -173,7 +239,7 @@ fun CodebaseScreen() {
         }
 
         // Test output banner if run
-        if (testOutput != null) {
+        testOutput?.let { outputText ->
             Card(
                 colors = CardDefaults.cardColors(containerColor = CodeBackground),
                 shape = RoundedCornerShape(8.dp),
@@ -189,13 +255,21 @@ fun CodebaseScreen() {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text("Package Validation Output", fontSize = 11.sp, color = EmeraldTertiary, fontWeight = FontWeight.Bold)
-                        IconButton(onClick = { testOutput = null }, modifier = Modifier.size(20.dp)) {
-                            Text("✕", color = TextMuted, fontSize = 12.sp)
+                        IconButton(
+                            onClick = { testOutput = null },
+                            modifier = Modifier.size(48.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Dismiss output",
+                                tint = TextMuted,
+                                modifier = Modifier.size(16.dp)
+                            )
                         }
                     }
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = testOutput!!,
+                        text = outputText,
                         fontSize = 11.sp,
                         color = TextPrimary,
                         fontFamily = FontFamily.Monospace,
@@ -237,10 +311,11 @@ fun CodebaseScreen() {
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
+                                    .heightIn(min = 44.dp)
                                     .clip(RoundedCornerShape(6.dp))
                                     .background(if (isSelected) CyanPrimary.copy(alpha = 0.2f) else Color.Transparent)
                                     .clickable { selectedFile = file }
-                                    .padding(vertical = 6.dp, horizontal = 4.dp),
+                                    .padding(vertical = 8.dp, horizontal = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Icon(
@@ -249,13 +324,14 @@ fun CodebaseScreen() {
                                     tint = if (isSelected) CyanPrimary else TextMuted,
                                     modifier = Modifier.size(14.dp)
                                 )
-                                Spacer(modifier = Modifier.width(4.dp))
+                                Spacer(modifier = Modifier.width(6.dp))
                                 Text(
                                     text = shortName,
                                     fontSize = 11.sp,
                                     color = if (isSelected) TextPrimary else TextSecondary,
                                     fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                    maxLines = 1
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
                                 )
                             }
                         }
